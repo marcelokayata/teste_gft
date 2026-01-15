@@ -1,0 +1,1 @@
+{'cep': '58348-000', 'logradouro': '', 'complemento': '', 'unidade': '', 'bairro': '', 'localidade': 'Riachão do Poço', 'uf': 'PB', 'estado': 'Paraíba', 'regiao': 'Nordeste', 'ibge': '2512762', 'gia': '', 'ddd': '83', 'siafi': '0506'}
