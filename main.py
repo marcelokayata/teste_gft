@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List
+import pandas as pd
+
 
 
 # =========================
@@ -53,6 +55,18 @@ class Dispatcher:
 # Exemplo de uso
 # =========================
 if __name__ == "__main__":
+    
+    # Read the CSV file using pandas
+    # df = pd.read_csv("Lista_de_CEPs.csv", sep=";")
+    df = pd.read_csv(
+        "Lista_de_CEPs.csv",
+        encoding="latin1",
+        dtype=str
+    )
+    print("CSV file read successfully!")
+    print(f"Shape: {df.shape}")
+    print(df.head())
+
     cep_data = {
         "cep": "58348-000",
         "logradouro": "",
