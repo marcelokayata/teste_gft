@@ -61,11 +61,14 @@ if __name__ == "__main__":
     df = pd.read_csv(
         "Lista_de_CEPs.csv",
         encoding="latin1",
+        sep=";",
+        usecols=["CEP Inicial"],
         dtype=str
     )
     print("CSV file read successfully!")
     print(f"Shape: {df.shape}")
     print(df.head())
+    print(df.columns)
 
     cep_data = {
         "cep": "58348-000",
@@ -83,15 +86,15 @@ if __name__ == "__main__":
         "siafi": "0506"
     }
 
-    console_sink = ConsoleSink()
-    file_sink = FileSink("ceps.txt")
-    memory_sink = MemorySink()
+    # console_sink = ConsoleSink()
+    # file_sink = FileSink("ceps.txt")
+    # memory_sink = MemorySink()
 
-    dispatcher = Dispatcher(
-        sinks=[console_sink, file_sink, memory_sink]
-    )
+    # dispatcher = Dispatcher(
+    #     sinks=[console_sink, file_sink, memory_sink]
+    # )
 
-    dispatcher.dispatch(cep_data)
+    # dispatcher.dispatch(cep_data)
 
-    print("\n[MemorySink] Conteúdo em memória:")
-    print(memory_sink.storage)
+    # print("\n[MemorySink] Conteúdo em memória:")
+    # print(memory_sink.storage)
