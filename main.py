@@ -3,9 +3,43 @@ from typing import Dict, List
 import pandas as pd
 
 
+# =========================
+# Strategy (interface) - LEITURA
+# =========================
+class Source(ABC):
+    @abstractmethod
+    def read(self) -> pd.DataFrame:
+        pass
+
+
+class PandasCSVSource(Source):
+    def __init__(
+        self,
+        filepath: str,
+        *,
+        encoding: str = "latin1",
+        sep: str = ";",
+        usecols: List[str] | None = None,
+        dtype=str,
+    ):
+        self.filepath = filepath
+        self.encoding = encoding
+        self.sep = sep
+        self.usecols = usecols
+        self.dtype = dtype
+
+    def read(self) -> pd.DataFrame:
+        return pd.read_csv(
+            self.filepath,
+            encoding=self.encoding,
+            sep=self.sep,
+            usecols=self.usecols,
+            dtype=self.dtype,
+        )
+
 
 # =========================
-# Strategy (interface)
+# Strategy (interface) - ESCRITA
 # =========================
 class Sink(ABC):
     @abstractmethod
@@ -13,9 +47,6 @@ class Sink(ABC):
         pass
 
 
-# =========================
-# Concrete Strategies
-# =========================
 class ConsoleSink(Sink):
     def write(self, data: Dict) -> None:
         print("[ConsoleSink] Gravando dados:")
@@ -55,46 +86,17 @@ class Dispatcher:
 # Exemplo de uso
 # =========================
 if __name__ == "__main__":
-    
-    # Read the CSV file using pandas
-    # df = pd.read_csv("Lista_de_CEPs.csv", sep=";")
-    df = pd.read_csv(
-        "Lista_de_CEPs.csv",
+    source = PandasCSVSource(
+        filepath="Lista_de_CEPs.csv",
         encoding="latin1",
         sep=";",
         usecols=["CEP Inicial"],
-        dtype=str
+        dtype=str,
     )
+
+    df = source.read()
+
     print("CSV file read successfully!")
     print(f"Shape: {df.shape}")
     print(df.head())
     print(df.columns)
-
-    cep_data = {
-        "cep": "58348-000",
-        "logradouro": "",
-        "complemento": "",
-        "unidade": "",
-        "bairro": "",
-        "localidade": "Riachão do Poço",
-        "uf": "PB",
-        "estado": "Paraíba",
-        "regiao": "Nordeste",
-        "ibge": "2512762",
-        "gia": "",
-        "ddd": "83",
-        "siafi": "0506"
-    }
-
-    # console_sink = ConsoleSink()
-    # file_sink = FileSink("ceps.txt")
-    # memory_sink = MemorySink()
-
-    # dispatcher = Dispatcher(
-    #     sinks=[console_sink, file_sink, memory_sink]
-    # )
-
-    # dispatcher.dispatch(cep_data)
-
-    # print("\n[MemorySink] Conteúdo em memória:")
-    # print(memory_sink.storage)
