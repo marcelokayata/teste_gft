@@ -80,3 +80,5 @@ Exemplo de registro de CEP:
 - **Transformer Pattern**: Validação e transformação de dados
 
 para rodar local: source venv/bin/activate
+Para criar o requirements.txt: pip freeze > requirements.txt
+Utilizar a versão correta: pyenv local 3.8.10
