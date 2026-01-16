@@ -4,8 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 import re
 import threading
 import csv
+import os
+import json
+from xml.sax.saxutils import escape
+
 import pandas as pd
 import requests
+from pymongo import MongoClient
 
 
 # =========================
@@ -49,14 +54,10 @@ class PandasCSVSource(Source):
 class CepProvider(ABC):
     @abstractmethod
     def fetch(self, cep8: str) -> Tuple[Optional[Dict], Optional[str]]:
-        """Retorna (data, erro). Se sucesso: (data, None). Se falha: (None, 'motivo')."""
         pass
 
 
 class ViaCepProvider(CepProvider):
-    """
-    Session por thread (thread-safe) + timeout (connect, read).
-    """
     def __init__(self, timeout_connect: float = 3.0, timeout_read: float = 7.0):
         self.timeout = (timeout_connect, timeout_read)
         self._local = threading.local()
@@ -73,7 +74,6 @@ class ViaCepProvider(CepProvider):
             r.raise_for_status()
             data = r.json()
 
-            # ViaCEP retorna {"erro": true} quando não encontra
             if isinstance(data, dict) and data.get("erro") is True:
                 return None, "nao_encontrado"
 
@@ -98,24 +98,11 @@ class Sink(ABC):
         pass
 
 
-class FileSink(Sink):
-    def __init__(self, filename: str):
-        self.filename = filename
-
-    def write(self, data: Dict) -> None:
-        with open(self.filename, "a", encoding="utf-8") as f:
-            f.write(str(data) + "\n")
-
-
 class ErrorCSVSink(Sink):
-    """
-    Escreve erros em CSV (append). Cria cabeçalho se o arquivo estiver vazio/não existir.
-    """
     def __init__(self, filename: str):
         self.filename = filename
         self._fieldnames = ["cep_raw", "cep_normalizado", "url", "erro"]
 
-        # cria arquivo com header se não existir/estiver vazio
         try:
             with open(self.filename, "r", encoding="utf-8") as _:
                 pass
@@ -128,6 +115,76 @@ class ErrorCSVSink(Sink):
         with open(self.filename, "a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=self._fieldnames)
             w.writerow({k: data.get(k, "") for k in self._fieldnames})
+
+
+class JSONLinesSink(Sink):
+    def __init__(self, filename: str):
+        self.filename = filename
+
+    def write(self, data: Dict) -> None:
+        with open(self.filename, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+class XMLSink(Sink):
+    def __init__(self, filename: str, root_tag: str = "enderecos", item_tag: str = "endereco"):
+        self.filename = filename
+        self.root_tag = root_tag
+        self.item_tag = item_tag
+        self._started = False
+
+    def begin(self) -> None:
+        if self._started:
+            return
+        with open(self.filename, "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            f.write(f"<{self.root_tag}>\n")
+        self._started = True
+
+    def end(self) -> None:
+        if not self._started:
+            return
+        with open(self.filename, "a", encoding="utf-8") as f:
+            f.write(f"</{self.root_tag}>\n")
+        self._started = False
+
+    def write(self, data: Dict) -> None:
+        if not self._started:
+            self.begin()
+
+        with open(self.filename, "a", encoding="utf-8") as f:
+            f.write(f"  <{self.item_tag}>\n")
+            for k, v in data.items():
+                key = escape(str(k))
+                val = escape("" if v is None else str(v))
+                f.write(f"    <{key}>{val}</{key}>\n")
+            f.write(f"  </{self.item_tag}>\n")
+
+
+class MongoSink(Sink):
+    """
+    Grava no MongoDB (upsert) por CEP.
+    - Usa data["cep"] se existir; senão usa data["_cep_consultado"].
+    """
+    def __init__(self, mongo_uri: str, db_name: str, collection_name: str):
+        self.client = MongoClient(mongo_uri)
+        self.collection = self.client[db_name][collection_name]
+
+        # Índice único em "cep" (se quiser garantir unicidade)
+        # Se alguns docs vierem sem "cep", a chave fallback vai ser "_cep_consultado".
+        # Mantemos simples: índice em "cep" e também em "_cep_consultado".
+        self.collection.create_index("cep")
+        self.collection.create_index("_cep_consultado")
+
+    def write(self, data: Dict) -> None:
+        key = data.get("cep") or data.get("_cep_consultado")
+        if not key:
+            return
+
+        # Upsert pelo "key" (padroniza num campo único)
+        filter_ = {"_key": key}
+        update = {"$set": dict(data), "$setOnInsert": {"_key": key}}
+        self.collection.update_one(filter_, update, upsert=True)
 
 
 class Dispatcher:
@@ -150,7 +207,7 @@ def normalize_to_cep8(value: str) -> Optional[str]:
 
 
 # =========================
-# Pipeline (streaming + map) + CSV de erros
+# Pipeline (streaming + map)
 # =========================
 def iter_ceps(df: pd.DataFrame, col: str) -> Iterable[str]:
     for v in df[col].fillna("").astype(str).values:
@@ -211,8 +268,13 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
+    csv_path = os.environ.get("CSV_PATH", "Lista_de_CEPs.csv")
+    mongo_uri = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+    mongo_db = os.environ.get("MONGO_DB", "ceps")
+    mongo_collection = os.environ.get("MONGO_COLLECTION", "enderecos")
+
     source = PandasCSVSource(
-        filepath="Lista_de_CEPs.csv",
+        filepath=csv_path,
         encoding="latin1",
         sep=";",
         usecols=["CEP Inicial"],
@@ -222,10 +284,13 @@ if __name__ == "__main__":
 
     provider = ViaCepProvider(timeout_connect=3.0, timeout_read=7.0)
 
-    # Sucessos (mantém seu output atual)
-    success_dispatcher = Dispatcher([FileSink("viacep_resultados.txt")])
+    json_sink = JSONLinesSink("enderecos.json")
+    xml_sink = XMLSink("enderecos.xml")
+    mongo_sink = MongoSink(mongo_uri, mongo_db, mongo_collection)
 
-    # Erros em CSV
+    xml_sink.begin()
+    success_dispatcher = Dispatcher([json_sink, xml_sink, mongo_sink])
+
     error_dispatcher = Dispatcher([ErrorCSVSink("erros_consultas.csv")])
 
     run_pipeline(
@@ -237,3 +302,5 @@ if __name__ == "__main__":
         max_workers=15,
         log_every=200,
     )
+
+    xml_sink.end()

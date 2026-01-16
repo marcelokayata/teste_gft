@@ -79,4 +79,8 @@ Exemplo de registro de CEP:
 - **Provider Pattern**: Abstração para diferentes fontes de dados de CEP
 - **Transformer Pattern**: Validação e transformação de dados
 
+para criar a pasta venv: python -m venv ./venv
 para rodar local: source venv/bin/activate
+Para instalar os requirements: pip install -r requirements.txt
+Para criar o requirements.txt: pip freeze > requirements.txt
+Utilizar a versão correta: pyenv local 3.8.10
