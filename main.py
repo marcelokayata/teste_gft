@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Iterable
+from typing import Dict, List, Optional, Iterable, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import re
 import threading
+import csv
 import pandas as pd
 import requests
 
@@ -47,7 +48,8 @@ class PandasCSVSource(Source):
 # =========================
 class CepProvider(ABC):
     @abstractmethod
-    def fetch(self, cep8: str) -> Optional[Dict]:
+    def fetch(self, cep8: str) -> Tuple[Optional[Dict], Optional[str]]:
+        """Retorna (data, erro). Se sucesso: (data, None). Se falha: (None, 'motivo')."""
         pass
 
 
@@ -64,18 +66,27 @@ class ViaCepProvider(CepProvider):
             self._local.session = requests.Session()
         return self._local.session
 
-    def fetch(self, cep8: str) -> Optional[Dict]:
+    def fetch(self, cep8: str) -> Tuple[Optional[Dict], Optional[str]]:
         url = f"https://viacep.com.br/ws/{cep8}/json/"
-        print(f"[ViaCepProvider] Consultando {url}")
         try:
             r = self._session().get(url, timeout=self.timeout)
             r.raise_for_status()
             data = r.json()
+
+            # ViaCEP retorna {"erro": true} quando não encontra
             if isinstance(data, dict) and data.get("erro") is True:
-                return None
-            return data
-        except (requests.RequestException, ValueError):
-            return None
+                return None, "nao_encontrado"
+
+            return data, None
+
+        except requests.Timeout:
+            return None, "timeout"
+        except requests.HTTPError as e:
+            return None, f"http_error:{getattr(e.response, 'status_code', 'unknown')}"
+        except requests.RequestException:
+            return None, "request_exception"
+        except ValueError:
+            return None, "json_decode_error"
 
 
 # =========================
@@ -87,11 +98,6 @@ class Sink(ABC):
         pass
 
 
-class ConsoleSink(Sink):
-    def write(self, data: Dict) -> None:
-        print("[ConsoleSink]", data)
-
-
 class FileSink(Sink):
     def __init__(self, filename: str):
         self.filename = filename
@@ -99,6 +105,29 @@ class FileSink(Sink):
     def write(self, data: Dict) -> None:
         with open(self.filename, "a", encoding="utf-8") as f:
             f.write(str(data) + "\n")
+
+
+class ErrorCSVSink(Sink):
+    """
+    Escreve erros em CSV (append). Cria cabeçalho se o arquivo estiver vazio/não existir.
+    """
+    def __init__(self, filename: str):
+        self.filename = filename
+        self._fieldnames = ["cep_raw", "cep_normalizado", "url", "erro"]
+
+        # cria arquivo com header se não existir/estiver vazio
+        try:
+            with open(self.filename, "r", encoding="utf-8") as _:
+                pass
+        except FileNotFoundError:
+            with open(self.filename, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=self._fieldnames)
+                w.writeheader()
+
+    def write(self, data: Dict) -> None:
+        with open(self.filename, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=self._fieldnames)
+            w.writerow({k: data.get(k, "") for k in self._fieldnames})
 
 
 class Dispatcher:
@@ -121,49 +150,64 @@ def normalize_to_cep8(value: str) -> Optional[str]:
 
 
 # =========================
-# Pipeline (streaming + map)
+# Pipeline (streaming + map) + CSV de erros
 # =========================
 def iter_ceps(df: pd.DataFrame, col: str) -> Iterable[str]:
-    # gera strings, sem criar lista gigante
     for v in df[col].fillna("").astype(str).values:
         yield v
+
 
 def run_pipeline(
     df: pd.DataFrame,
     *,
     cep_column: str,
     provider: CepProvider,
-    dispatcher: Dispatcher,
+    success_dispatcher: Dispatcher,
+    error_dispatcher: Dispatcher,
     max_workers: int = 15,
     log_every: int = 200,
 ) -> None:
     total = ok = bad = 0
 
-    def task(raw_cep: str) -> Optional[Dict]:
+    def task(raw_cep: str) -> Tuple[bool, Dict]:
         cep8 = normalize_to_cep8(raw_cep)
         if not cep8:
-            return None
-        data = provider.fetch(cep8)
-        if not data:
-            return None
-        data["_cep_consultado"] = cep8
-        return data
+            return False, {
+                "cep_raw": raw_cep,
+                "cep_normalizado": "",
+                "url": "",
+                "erro": "cep_invalido",
+            }
 
-    # executor.map não cria 10k futures em memória; ele “vai puxando” aos poucos
+        data, err = provider.fetch(cep8)
+        url = f"https://viacep.com.br/ws/{cep8}/json/"
+
+        if err is not None or data is None:
+            return False, {
+                "cep_raw": raw_cep,
+                "cep_normalizado": cep8,
+                "url": url,
+                "erro": err or "falha_desconhecida",
+            }
+
+        data["_cep_consultado"] = cep8
+        return True, data
+
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for result in ex.map(task, iter_ceps(df, cep_column), chunksize=50):
+        for success, payload in ex.map(task, iter_ceps(df, cep_column), chunksize=50):
             total += 1
 
-            if result is None:
-                bad += 1
-            else:
+            if success:
                 ok += 1
-                dispatcher.dispatch(result)
+                success_dispatcher.dispatch(payload)
+            else:
+                bad += 1
+                error_dispatcher.dispatch(payload)
 
             if total % log_every == 0:
-                print(f"[PROGRESSO] processados={total} ok={ok} invalidos/nao_encontrados={bad}")
+                print(f"[PROGRESSO] processados={total} ok={ok} erros={bad}")
 
-    print(f"\n[FIM] processados={total} ok={ok} invalidos/nao_encontrados={bad}")
+    print(f"\n[FIM] processados={total} ok={ok} erros={bad}")
 
 
 if __name__ == "__main__":
@@ -174,18 +218,22 @@ if __name__ == "__main__":
         usecols=["CEP Inicial"],
         dtype=str,
     )
-
     df = source.read()
 
     provider = ViaCepProvider(timeout_connect=3.0, timeout_read=7.0)
-    dispatcher = Dispatcher([FileSink("viacep_resultados.txt")])
 
-    # Comece conservador:
+    # Sucessos (mantém seu output atual)
+    success_dispatcher = Dispatcher([FileSink("viacep_resultados.txt")])
+
+    # Erros em CSV
+    error_dispatcher = Dispatcher([ErrorCSVSink("erros_consultas.csv")])
+
     run_pipeline(
         df,
         cep_column="CEP Inicial",
         provider=provider,
-        dispatcher=dispatcher,
-        max_workers=15,   # ajuste aqui
-        log_every=200,    # mostra progresso
+        success_dispatcher=success_dispatcher,
+        error_dispatcher=error_dispatcher,
+        max_workers=15,
+        log_every=200,
     )
