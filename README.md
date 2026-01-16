@@ -84,3 +84,16 @@ para rodar local: source venv/bin/activate
 Para instalar os requirements: pip install -r requirements.txt
 Para criar o requirements.txt: pip freeze > requirements.txt
 Utilizar a versão correta: pyenv local 3.8.10
+
+
+Como rodar
+Garanta que Lista_de_CEPs.csv está no mesmo diretório do compose.
+docker compose up --build
+
+Verificando os dados no MongoDB (opcional)
+docker exec -it mongo_local mongosh
+
+Depois:
+use ceps
+db.enderecos.countDocuments()
+db.enderecos.findOne()
