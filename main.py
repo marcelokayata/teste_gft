@@ -6,6 +6,8 @@ import threading
 import csv
 import pandas as pd
 import requests
+import json
+from xml.sax.saxutils import escape
 
 
 # =========================
@@ -138,6 +140,59 @@ class Dispatcher:
         for sink in self.sinks:
             sink.write(data)
 
+class JSONLinesSink(Sink):
+    """
+    Grava um JSON por linha (formato jsonl). É ideal para grandes volumes.
+    """
+    def __init__(self, filename: str):
+        self.filename = filename
+
+    def write(self, data: Dict) -> None:
+        with open(self.filename, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+class XMLSink(Sink):
+    """
+    Grava um XML único com vários endereços.
+    - Chame begin() antes do pipeline e end() depois.
+    """
+    def __init__(self, filename: str, root_tag: str = "enderecos", item_tag: str = "endereco"):
+        self.filename = filename
+        self.root_tag = root_tag
+        self.item_tag = item_tag
+        self._started = False
+
+    def begin(self) -> None:
+        if self._started:
+            return
+        with open(self.filename, "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            f.write(f"<{self.root_tag}>\n")
+        self._started = True
+
+    def end(self) -> None:
+        if not self._started:
+            return
+        with open(self.filename, "a", encoding="utf-8") as f:
+            f.write(f"</{self.root_tag}>\n")
+        self._started = False
+
+    def write(self, data: Dict) -> None:
+        if not self._started:
+            # segurança: garante root aberto
+            self.begin()
+
+        with open(self.filename, "a", encoding="utf-8") as f:
+            f.write(f"  <{self.item_tag}>\n")
+            for k, v in data.items():
+                # garante XML válido (escapa < > & " ')
+                key = escape(str(k))
+                val = escape("" if v is None else str(v))
+                f.write(f"    <{key}>{val}</{key}>\n")
+            f.write(f"  </{self.item_tag}>\n")
+
+
 
 # =========================
 # Util: normalização
@@ -223,7 +278,14 @@ if __name__ == "__main__":
     provider = ViaCepProvider(timeout_connect=3.0, timeout_read=7.0)
 
     # Sucessos (mantém seu output atual)
-    success_dispatcher = Dispatcher([FileSink("viacep_resultados.txt")])
+    json_sink = JSONLinesSink("enderecos.json")   # (na prática é jsonl, mas nome .json ok)
+    xml_sink = XMLSink("enderecos.xml")
+
+    # abre o XML antes de começar
+    xml_sink.begin()
+
+    success_dispatcher = Dispatcher([json_sink, xml_sink])
+
 
     # Erros em CSV
     error_dispatcher = Dispatcher([ErrorCSVSink("erros_consultas.csv")])
@@ -237,3 +299,5 @@ if __name__ == "__main__":
         max_workers=15,
         log_every=200,
     )
+
+    xml_sink.end()
