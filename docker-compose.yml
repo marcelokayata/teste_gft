@@ -1,0 +1,25 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: mongo_local
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  app:
+    build: .
+    container_name: viacep_loader
+    depends_on:
+      - mongo
+    environment:
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "ceps"
+      MONGO_COLLECTION: "enderecos"
+      CSV_PATH: "/app/Lista_de_CEPs.csv"
+    volumes:
+      - ./:/app
+    command: ["python", "app.py"]
+
+volumes:
+  mongo_data:
